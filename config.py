@@ -10,7 +10,7 @@ GOOGLE_CREDENTIALS_FILE = os.getenv('GOOGLE_CREDENTIALS_FILE', 'credentials.json
 
 # MOEX конфигурация
 MOEX_URL = os.getenv('MOEX_URL', 'https://www.moex.com/')
-UPDATE_INTERVAL = int(os.getenv('UPDATE_INTERVAL', '600'))  # 10 минут в секундах
+UPDATE_INTERVAL = int(os.getenv('UPDATE_INTERVAL', '180'))  # 10 минут в секундах
 
 # Logging конфигурация
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
@@ -27,6 +27,7 @@ SHEET_COLUMNS = [
     'Название',
     'Дата погашения',
     'Дата выплаты купона',
+    'Дата следующей выплаты купона',
     'Сумма купона',
     'НКД',
     'Периодичность выплаты купонов',
@@ -35,5 +36,6 @@ SHEET_COLUMNS = [
     'Статус (Рейтинг)',
     'Дата оферты',
     'Текущая стоимость',
+    'Стоимость в валюте',
     'Последнее обновление'
 ]

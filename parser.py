@@ -15,6 +15,8 @@ class MOEXBondsParser:
     def __init__(self):
         self.base_url = MOEX_URL
         self.bonds_data = []
+        self.currency_cache = {}  # Кэш валют для облигаций
+        self.exchange_rates = {}  # Кэш валютных курсов (USD, EUR и т.д. к RUB)
 
     def fetch_bonds_data(self) -> List[Dict]:
         """
@@ -24,6 +26,9 @@ class MOEXBondsParser:
             List[Dict]: Список словарей с данными об облигациях
         """
         try:
+            # Получаем актуальные валютные курсы перед парсингом
+            self._fetch_exchange_rates()
+            
             # Используем MOEX ISS API для получения данных об облигациях
             url = 'https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQCB/securities.json'
             
@@ -40,7 +45,6 @@ class MOEXBondsParser:
             self.bonds_data = self._parse_bonds_response(data)
             
             # Попытка получить дополнительные данные по НКД и другим полям
-            # через отдельный запрос к aggregates если необходимо
             self._enrich_bonds_data()
             
             logger.info(f'Успешно загружены данные об {len(self.bonds_data)} облигациях')
@@ -67,6 +71,148 @@ class MOEXBondsParser:
                     bond['НКД'] = 'Данные недоступны'
         except Exception as e:
             logger.warning(f'Ошибка при обогащении данных: {e}')
+
+    def _fetch_exchange_rates(self):
+        """
+        Получение актуальных валютных курсов с MOEX (от CBRF)
+        Загружаем курсы основных валют (USD, EUR, CNY, JPY) к RUB
+        """
+        try:
+            # Загружаем курсы валют через MOEX ISS API (статистика ЦБ РФ)
+            url = 'https://iss.moex.com/iss/statistics/engines/currency/markets/selt/rates.json'
+            
+            response = requests.get(url, params={'iss.meta': 'off'}, headers=HEADERS, timeout=15)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # Обработаем данные от CBRF (Центральный Банк РФ)
+            if 'cbrf' in data:
+                cbrf_data = data['cbrf']
+                if 'data' in cbrf_data and 'columns' in cbrf_data:
+                    cols = cbrf_data['columns']
+                    rows = cbrf_data['data']
+                    
+                    # Структура данных: [USDTOM..., EUR..., ...]
+                    # cols: ['CBRF_USD_LAST', 'CBRF_EUR_LAST', 'CBRF_CNY_LAST', 'CBRF_JPY_LAST', ...]
+                    # Находим индексы нужных колонок
+                    
+                    if rows:
+                        row = rows[0]  # Берём последние данные (первая строка)
+                        row_dict = dict(zip(cols, row))
+                        
+                        # Ищем курсы по стандартным колонкам CBRF
+                        currency_fields = {
+                            'CBRF_USD_LAST': 'USD',
+                            'CBRF_EUR_LAST': 'EUR',
+                            'CBRF_CNY_LAST': 'CNY',
+                            'CBRF_JPY_LAST': 'JPY',
+                            'CBRF_GBP_LAST': 'GBP',
+                        }
+                        
+                        for field, currency in currency_fields.items():
+                            rate = row_dict.get(field)
+                            if rate:
+                                try:
+                                    rate_value = float(rate)
+                                    if rate_value > 0:
+                                        self.exchange_rates[currency] = rate_value
+                                        logger.debug(f'Получен курс {currency}/RUB от CBRF: {rate_value}')
+                                except (ValueError, TypeError):
+                                    pass
+            
+            # Используем дефолтные курсы если не получили нужные значения
+            if not self.exchange_rates:
+                raise Exception("Не получены валютные курсы от CBRF")
+            
+            logger.info(f'Загружены актуальные валютные курсы: {self.exchange_rates}')
+            
+        except Exception as e:
+            logger.warning(f'Ошибка при получении валютных курсов: {e}')
+            # Используем дефолтные курсы если ошибка
+            self.exchange_rates = {
+                'USD': 100.0,
+                'EUR': 110.0,
+                'CNY': 15.0,
+                'JPY': 0.75,
+                'GBP': 130.0
+            }
+            logger.info(f'Использованы дефолтные валютные курсы: {self.exchange_rates}')
+
+    def _get_currency_from_moex(self, secid: str) -> Optional[str]:
+        """
+        Получение информации о валюте облигации с MOEX через отдельный запрос
+        
+        Args:
+            secid: Идентификатор ценной бумаги
+            
+        Returns:
+            Optional[str]: Код валюты (USD, EUR, RUB и т.д.) или None
+        """
+        try:
+            # Проверяем кэш
+            if secid in self.currency_cache:
+                return self.currency_cache[secid]
+            
+            # Запрос информации о конкретной облигации
+            url = f'https://iss.moex.com/iss/securities/{secid}.json'
+            
+            params = {
+                'iss.meta': 'off',
+            }
+            
+            response = requests.get(url, params=params, headers=HEADERS, timeout=5)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if 'securities' in data and data['securities']['data']:
+                sec_data = data['securities']['data'][0]
+                sec_cols = data['securities']['columns']
+                sec_dict = dict(zip(sec_cols, sec_data))
+                
+                # Проверяем несколько полей в порядке приоритета
+                # 1. ISIN код
+                isin = (sec_dict.get('ISIN') or '').strip().upper()
+                if isin:
+                    if isin.startswith('XS'):
+                        return 'EUR'
+                    elif isin.startswith('US'):
+                        return 'USD'
+                    elif isin.startswith('RU'):
+                        return 'RUB'
+                    elif isin.startswith('CH'):
+                        return 'CNY'
+                    elif isin.startswith('JP'):
+                        return 'JPY'
+                
+                # 2. SECNAME (название)
+                secname = (sec_dict.get('SECNAME') or '').upper()
+                if 'USD' in secname or 'ДОЛЛАР' in secname:
+                    return 'USD'
+                elif 'EUR' in secname or 'ЕВРО' in secname:
+                    return 'EUR'
+                
+                # 3. CURRENCYID
+                currency = (sec_dict.get('CURRENCYID') or '').strip().upper()
+                if currency:
+                    if currency in ('SUR', 'RUR'):
+                        return 'RUB'
+                    return currency
+                
+                return None
+            
+            return None
+            
+        except requests.exceptions.Timeout:
+            logger.debug(f'Timeout при получении валюты для {secid}')
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.debug(f'Ошибка при получении валюты для {secid}: {e}')
+            return None
+        except Exception as e:
+            logger.debug(f'Неожиданная ошибка при обработке валюты {secid}: {e}')
+            return None
 
     def _parse_bonds_response(self, data: Dict) -> List[Dict]:
         """
@@ -178,10 +324,67 @@ class MOEXBondsParser:
             # Номинал облигации
             face_value = sec_dict.get('FACEVALUE', '')
 
-            # Валюта облигации (CURRENCYID)
-            currency = sec_dict.get('CURRENCYID', 'RUB')
+            # Валюта облигации - приоритет: FACEUNIT > SECNAME (точные паттерны) > ISIN (XS) > отдельный запрос > RUB
+            currency = ''
+            currency_source = ''
+            
+            # Попытка 1: Использовать FACEUNIT (валюта номинала) - САМЫЙ НАДЕЖНЫЙ ИСТОЧНИК!
+            # Это официальное поле на MOEX, показывает реальную валюту номинала облигации
+            faceunit = (sec_dict.get('FACEUNIT') or '').strip().upper()
+            if faceunit and faceunit not in ('', 'RUB', 'SUR', 'RUR'):
+                # FACEUNIT содержит реальный код валюты (USD, EUR, GBP, JPY, CNY)
+                currency = faceunit
+                currency_source = 'FACEUNIT (валюта номинала)'
+            elif faceunit in ('RUB', 'SUR', 'RUR'):
+                # Явно указана рубль
+                currency = 'RUB'
+                currency_source = 'FACEUNIT (рубль)'
+            
+            # Попытка 2: Извлечь валюту из SECNAME (полного названия облигации)
+            # На MOEX RU* ISINs используются для любых валют, поэтому SECNAME дополнительный способ
+            # НО: нужно быть осторожнее - "Европлан" и "ЕвроТранс" - это названия компаний, не валюты!
+            if not currency:
+                name_upper = name.upper()
+                
+                # Проверяем точные паттерны валют в названии
+                if 'USD' in name_upper or '-USD' in name_upper or 'USDRUR' in name_upper:
+                    currency = 'USD'
+                    currency_source = 'SECNAME'
+                elif 'EUR' in name_upper or '-EUR' in name_upper or 'EURUR' in name_upper:
+                    currency = 'EUR'
+                    currency_source = 'SECNAME'
+                elif 'GBP' in name_upper or 'ФУНТ' in name_upper:
+                    currency = 'GBP'
+                    currency_source = 'SECNAME'
+                elif 'JPY' in name_upper or 'ЙЕН' in name_upper:
+                    currency = 'JPY'
+                    currency_source = 'SECNAME'
+                elif 'CNY' in name_upper or 'ЮАНЬ' in name_upper or '-CNY' in name_upper:
+                    currency = 'CNY'
+                    currency_source = 'SECNAME'
+            
+            # Попытка 3: Проверка XS ISINs для EUR (если SECNAME не дал результат)
+            if not currency:
+                isin = (sec_dict.get('ISIN') or '').strip().upper()
+                if isin and isin.startswith('XS'):
+                    currency = 'EUR'
+                    currency_source = 'ISIN (XS prefix)'
+            
+            # Попытка 4: Отдельный запрос к MOEX API для конкретной облигации
+            if not currency:
+                currency = self._get_currency_from_moex(secid)
+                if currency:
+                    currency_source = 'отдельный запрос MOEX'
+            
+            # Попытка 6: По умолчанию RUB если ничего не помогло
+            if not currency:
+                currency = 'RUB'
+                currency_source = 'по умолчанию'
+                logger.warning(f"Валюта не определена для облигации {secid} ({name}), используется RUB по умолчанию")
+
             currency_symbols = {
                 'RUB': '₽',
+                'RUR': '₽',
                 'SUR': '₽',
                 'USD': '$',
                 'EUR': '€',
@@ -189,7 +392,13 @@ class MOEXBondsParser:
                 'CNY': '¥',
                 'GBP': '£',
             }
+            
+            # Выводим валюту с символом
             currency_symbol = currency_symbols.get(currency, currency)
+            currency_display = f'{currency} {currency_symbol}' if currency else 'Не определена'
+            
+            # Логирование для отладки с полной информацией
+            logger.debug(f'Облигация {secid} ({name}): валюта={currency} {currency_symbol}, источник={currency_source}')
 
             # Статус (Рейтинг) — попробуем несколько полей
             status = sec_dict.get('RATINGOFDB', '')
@@ -199,10 +408,81 @@ class MOEXBondsParser:
             # Дата оферты
             offerdate = sec_dict.get('OFFERDATE', '')
 
-            # Текущая стоимость (цена из marketdata)
-            current_price = market_dict.get('PRICE', '')
-            if not current_price:
-                current_price = market_dict.get('LAST', '')
+            # Текущая стоимость (цена из marketdata с приоритетной цепочкой)
+            # Приоритет: PRICE > LAST > PREVPRICE > (BID+OFFER)/2 > OPEN > HIGH > LOW > номинал (100%)
+            current_price = None
+            price_source = ''
+            
+            # Пытаемся получить текущую цену в разном порядке
+            for price_field in ['PRICE', 'LAST', 'PREVPRICE', 'OPEN', 'HIGH', 'LOW']:
+                price_value = market_dict.get(price_field)
+                if price_value and price_value not in ('', None, 0, '0'):
+                    try:
+                        current_price = float(price_value)
+                        price_source = price_field
+                        break
+                    except (ValueError, TypeError):
+                        continue
+            
+            # Если основные цены не найдены, пытаемся использовать среднее BID/OFFER
+            if current_price is None:
+                bid = market_dict.get('BID')
+                offer = market_dict.get('OFFER')
+                try:
+                    bid_val = float(bid) if bid and bid not in ('', None, 0, '0') else None
+                    offer_val = float(offer) if offer and offer not in ('', None, 0, '0') else None
+                    if bid_val and offer_val:
+                        current_price = (bid_val + offer_val) / 2
+                        price_source = 'BID/OFFER avg'
+                    elif bid_val:
+                        current_price = bid_val
+                        price_source = 'BID'
+                    elif offer_val:
+                        current_price = offer_val
+                        price_source = 'OFFER'
+                except (ValueError, TypeError):
+                    pass
+            
+            # Если цена не найдена, оставляем пустую ячейку
+            if current_price is None:
+                current_price_display = ''
+            else:
+                current_price_display = round(current_price, 2)
+            
+            # Логирование для отладки
+            if secid == 'BYM000002402':
+                logger.debug(f'Облигация {secid}: текущая стоимость={current_price_display}% (источник: {price_source}), номинал={face_value}')
+
+            # Стоимость в валюте (конвертирование в рубли с учётом курса)
+            value_str = ''
+            if current_price is not None:
+                try:
+                    price_percent = float(current_price)
+                    face = float(face_value) if face_value else 1.0
+                    if face == 0:
+                        face = 100.0
+                    
+                    # Вычисляем абсолютную стоимость в валюте облигации
+                    value_in_currency = face * price_percent / 100
+                    
+                    # Конвертируем в рубли если это не RUB
+                    if currency and currency != 'RUB':
+                        exchange_rate = self.exchange_rates.get(currency)
+                        if exchange_rate and exchange_rate > 0:
+                            value_in_rub = value_in_currency * exchange_rate
+                            value_str = f"{round(value_in_rub, 2)} ₽"
+                            logger.debug(f'{secid}: {value_in_currency:.2f} {currency} * {exchange_rate} = {value_in_rub:.2f} ₽')
+                        else:
+                            # Если курс не получен, показываем в исходной валюте
+                            currency_symbol = {'USD': '$', 'EUR': '€', 'GBP': '£', 'JPY': '¥', 'CNY': '¥'}.get(currency, currency)
+                            value_str = f"{round(value_in_currency, 2)} {currency_symbol}"
+                            logger.warning(f'{secid}: курс {currency} не найден, выводим в {currency_symbol}')
+                    else:
+                        # RUB - выводим сразу
+                        value_str = f"{round(value_in_currency, 2)} ₽"
+                except (ValueError, TypeError) as e:
+                    logger.debug(f'Ошибка при вычислении стоимости {secid}: {e}')
+                    value_str = ''
 
             # Последнее обновление
             last_update = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -212,14 +492,16 @@ class MOEXBondsParser:
                 'Название': name,
                 'Дата погашения': self._format_date(mat_date),
                 'Дата выплаты купона': self._format_date(coupon_date),
+                'Дата следующей выплаты купона': self._format_date(sec_dict.get('NEXTCOUPON', '')),
                 'Сумма купона': coupon_value,
                 'НКД': accruedint,
                 'Периодичность выплаты купонов': self._format_coupon_frequency(coupon_freq),
                 'Номинал': face_value,
-                'Валюта': currency_symbol,
+                'Валюта': currency_display,
                 'Статус (Рейтинг)': status,
                 'Дата оферты': self._format_date(offerdate),
-                'Текущая стоимость': current_price,
+                'Текущая стоимость': current_price_display,
+                'Стоимость в валюте': value_str,
                 'Последнее обновление': last_update
             }
             return bond
