@@ -177,20 +177,33 @@ class MOEXBondsParser:
             
             # Номинал облигации
             face_value = sec_dict.get('FACEVALUE', '')
-            
+
+            # Валюта облигации (CURRENCYID)
+            currency = sec_dict.get('CURRENCYID', 'RUB')
+            currency_symbols = {
+                'RUB': '₽',
+                'SUR': '₽',
+                'USD': '$',
+                'EUR': '€',
+                'JPY': '¥',
+                'CNY': '¥',
+                'GBP': '£',
+            }
+            currency_symbol = currency_symbols.get(currency, currency)
+
             # Статус (Рейтинг) — попробуем несколько полей
             status = sec_dict.get('RATINGOFDB', '')
             if not status:
                 status = sec_dict.get('REGNUMBER', '')
-            
+
             # Дата оферты
             offerdate = sec_dict.get('OFFERDATE', '')
-            
+
             # Текущая стоимость (цена из marketdata)
             current_price = market_dict.get('PRICE', '')
             if not current_price:
                 current_price = market_dict.get('LAST', '')
-            
+
             # Последнее обновление
             last_update = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -203,6 +216,7 @@ class MOEXBondsParser:
                 'НКД': accruedint,
                 'Периодичность выплаты купонов': self._format_coupon_frequency(coupon_freq),
                 'Номинал': face_value,
+                'Валюта': currency_symbol,
                 'Статус (Рейтинг)': status,
                 'Дата оферты': self._format_date(offerdate),
                 'Текущая стоимость': current_price,
