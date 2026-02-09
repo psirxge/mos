@@ -74,8 +74,8 @@ class MOEXBondsParser:
 
     def _fetch_exchange_rates(self):
         """
-        Получение актуальных валютных курсов с MOEX (от CBRF)
-        Загружаем курсы основных валют (USD, EUR, CNY, JPY) к RUB
+        Получение актуальных валютных курсов с MOEX и CBRF
+        Загружаем курсы основных валют (USD, EUR, CNY, JPY, CHF, GBP) к RUB
         """
         try:
             # Загружаем курсы валют через MOEX ISS API (статистика ЦБ РФ)
@@ -93,10 +93,6 @@ class MOEXBondsParser:
                     cols = cbrf_data['columns']
                     rows = cbrf_data['data']
                     
-                    # Структура данных: [USDTOM..., EUR..., ...]
-                    # cols: ['CBRF_USD_LAST', 'CBRF_EUR_LAST', 'CBRF_CNY_LAST', 'CBRF_JPY_LAST', ...]
-                    # Находим индексы нужных колонок
-                    
                     if rows:
                         row = rows[0]  # Берём последние данные (первая строка)
                         row_dict = dict(zip(cols, row))
@@ -105,9 +101,6 @@ class MOEXBondsParser:
                         currency_fields = {
                             'CBRF_USD_LAST': 'USD',
                             'CBRF_EUR_LAST': 'EUR',
-                            'CBRF_CNY_LAST': 'CNY',
-                            'CBRF_JPY_LAST': 'JPY',
-                            'CBRF_GBP_LAST': 'GBP',
                         }
                         
                         for field, currency in currency_fields.items():
@@ -121,9 +114,14 @@ class MOEXBondsParser:
                                 except (ValueError, TypeError):
                                     pass
             
-            # Используем дефолтные курсы если не получили нужные значения
-            if not self.exchange_rates:
-                raise Exception("Не получены валютные курсы от CBRF")
+            # Получаем курсы для CNY, JPY, CHF, GBP с MOEX через отдельные запросы
+            logger.debug('Начинаю получение дополнительных курсов валют...')
+            self._fetch_additional_exchange_rates()
+            logger.debug(f'После дополнительных запросов: {self.exchange_rates}')
+            
+            # Используем дефолтные курсы если не получили основные (USD, EUR)
+            if 'USD' not in self.exchange_rates or 'EUR' not in self.exchange_rates:
+                raise Exception("Не получены основные валютные курсы")
             
             logger.info(f'Загружены актуальные валютные курсы: {self.exchange_rates}')
             
@@ -135,9 +133,92 @@ class MOEXBondsParser:
                 'EUR': 110.0,
                 'CNY': 15.0,
                 'JPY': 0.75,
-                'GBP': 130.0
+                'GBP': 130.0,
+                'CHF': 110.0
             }
             logger.info(f'Использованы дефолтные валютные курсы: {self.exchange_rates}')
+
+    def _fetch_additional_exchange_rates(self):
+        """
+        Получение курсов для дополнительных валют (CNY, JPY, CHF, GBP) через разные источники
+        """
+        # Попытка 1: Попробуем получить из API по курс ЦБ РФ через другой эндпоинт
+        cbrf_url = 'https://www.cbr-xml-daily.ru/daily_json.js'
+        try:
+            response = requests.get(cbrf_url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if 'Valute' in data:
+                    currency_map = {
+                        'CNY': 'CNY',
+                        'JPY': 'JPY',
+                        'CHF': 'CHF',
+                        'GBP': 'GBP',
+                    }
+                    
+                    for api_code, currency in currency_map.items():
+                        if currency in self.exchange_rates:
+                            continue
+                        
+                        if api_code in data['Valute']:
+                            rate_data = data['Valute'][api_code]
+                            rate = rate_data.get('Value')
+                            nominal = rate_data.get('Nominal', 1)
+                            
+                            if rate and nominal:
+                                try:
+                                    rate_value = float(rate) / float(nominal)
+                                    if rate_value > 0:
+                                        self.exchange_rates[currency] = rate_value
+                                        logger.info(f'Получен курс {currency}/RUB от ЦБ РФ: {rate_value}')
+                                except (ValueError, TypeError):
+                                    pass
+        except Exception as e:
+            logger.debug(f'Не удалось получить курсы от ЦБ РФ: {e}')
+        
+        # Попытка 2: Используем MOEX данные если ЦБ не сработал
+        currency_pairs = {
+            'CNYRUB': 'CNY',
+            'JPYRUB': 'JPY',
+            'CHFRUB': 'CHF',
+            'GBPRUB': 'GBP',
+        }
+        
+        for pair, currency in currency_pairs.items():
+            if currency in self.exchange_rates:
+                continue
+                
+            try:
+                url = f'https://iss.moex.com/iss/engines/currency/markets/selt/securities/{pair}.json'
+                response = requests.get(url, params={'iss.meta': 'off'}, headers=HEADERS, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # Попробуем использовать данные из securities если marketdata пуста
+                    if 'securities' in data and 'data' in data['securities'] and data['securities']['data']:
+                        sec_data = data['securities']['data']
+                        cols = data['securities'].get('columns', [])
+                        
+                        if sec_data and cols:
+                            sec_row = sec_data[0]
+                            sec_dict = dict(zip(cols, sec_row))
+                            
+                            # Пытаемся получить цену
+                            for price_field in ['PREVWAPRICE', 'PREVPRICE', 'WAPRICE']:
+                                if price_field in sec_dict:
+                                    price = sec_dict[price_field]
+                                    if price and price not in ('', None, 0, '0'):
+                                        try:
+                                            rate_value = float(price)
+                                            if rate_value > 0:
+                                                self.exchange_rates[currency] = rate_value
+                                                logger.debug(f'Получен курс {currency}/RUB от MOEX (securities): {rate_value}')
+                                                break
+                                        except (ValueError, TypeError):
+                                            continue
+            except Exception as e:
+                logger.debug(f'Не удалось получить курс для {currency} из MOEX: {e}')
 
     def _get_currency_from_moex(self, secid: str) -> Optional[str]:
         """
@@ -487,6 +568,26 @@ class MOEXBondsParser:
             # Последнее обновление
             last_update = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
+            # Количество выпущенных облигаций
+            issue_size = sec_dict.get('ISSUESIZE', '')
+            if not issue_size:
+                issue_size = sec_dict.get('FACESIZE', '')
+            if not issue_size:
+                issue_size = sec_dict.get('ISSUE_SIZE', '')
+            if not issue_size:
+                issue_size = sec_dict.get('QUANTITY', '')
+            # Форматирование количества
+            if issue_size:
+                try:
+                    issue_num = float(issue_size)
+                    # Форматируем число с разделителями
+                    if issue_num == int(issue_num):
+                        issue_size = f'{int(issue_num):,}'.replace(',', ' ')
+                    else:
+                        issue_size = f'{issue_num:,.2f}'.replace(',', ' ')
+                except (ValueError, TypeError):
+                    issue_size = str(issue_size) if issue_size else ''
+
             bond = {
                 'Котировка': secid,
                 'Название': name,
@@ -502,6 +603,7 @@ class MOEXBondsParser:
                 'Дата оферты': self._format_date(offerdate),
                 'Текущая стоимость': current_price_display,
                 'Стоимость в валюте': value_str,
+                'Количество выпущенных облигаций': issue_size,
                 'Последнее обновление': last_update
             }
             return bond
