@@ -126,17 +126,8 @@ class MOEXBondsParser:
             logger.info(f'Загружены актуальные валютные курсы: {self.exchange_rates}')
             
         except Exception as e:
-            logger.warning(f'Ошибка при получении валютных курсов: {e}')
-            # Используем дефолтные курсы если ошибка
-            self.exchange_rates = {
-                'USD': 100.0,
-                'EUR': 110.0,
-                'CNY': 15.0,
-                'JPY': 0.75,
-                'GBP': 130.0,
-                'CHF': 110.0
-            }
-            logger.info(f'Использованы дефолтные валютные курсы: {self.exchange_rates}')
+            logger.error(f'Критическая ошибка при получении курсов: {e}')
+            logger.warning('Программа продолжит работу')
 
     def _fetch_additional_exchange_rates(self):
         """
