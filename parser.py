@@ -595,7 +595,8 @@ class MOEXBondsParser:
                 'Текущая стоимость': current_price_display,
                 'Стоимость в валюте': value_str,
                 'Количество выпущенных облигаций': issue_size,
-                'Последнее обновление': last_update
+                'Последнее обновление': last_update,
+                'Ссылка на страницу MOEX': 'https://www.moex.com/ru/issue.aspx?board=TQCB&code='+secid
             }
             return bond
         except Exception as e:
