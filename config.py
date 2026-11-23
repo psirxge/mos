@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Google Sheets конфигурация
-GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID', '1IPSrwsLZvL8vqwW_Hk5cv0rUl6mAtLMzdhGShaLGYaw')
+GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID', '1IPSrwsLZvL8vqwW_Hk5cv0rUl6mAtLMzdhGShaLGYaw') #  УДАЛЁН И НЕ ИСПОЛЬЗУЕТСЯ 
 GOOGLE_CREDENTIALS_FILE = os.getenv('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
 
 # MOEX конфигурация
